@@ -23,11 +23,40 @@
 #include <netdutils/Log.h>
 
 #include "android/net/BnNetd.h"
+#include "android/net/ext/BnNetdExt.h"
 
 namespace android {
 namespace net {
 
-class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd {
+    // TODO: Maybe move these macros to a separate header to prevent accidental overrides if this file
+    // gets included elsewhere later.
+#define ENFORCE_ANY_PERMISSION(...)                                \
+    do {                                                           \
+        binder::Status status = checkAnyPermission({__VA_ARGS__}); \
+        if (!status.isOk()) {                                      \
+            return status;                                         \
+        }                                                          \
+    } while (0)
+
+#define NETD_LOCKING_RPC(lock, ... /* permissions */) \
+    ENFORCE_ANY_PERMISSION(__VA_ARGS__);              \
+    std::lock_guard _lock(lock);
+
+#define NETD_BIG_LOCK_RPC(... /* permissions */) NETD_LOCKING_RPC(gBigNetdLock, __VA_ARGS__)
+
+#define RETURN_BINDER_STATUS_IF_NOT_OK(logEntry, res) \
+    do {                                              \
+        if (!isOk((res))) {                           \
+            logErrorStatus((logEntry), (res));        \
+            return asBinderStatus((res));             \
+        }                                             \
+    } while (0)
+
+#define ENFORCE_NETWORK_STACK_PERMISSIONS() \
+    ENFORCE_ANY_PERMISSION(PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK)
+
+
+class NetdNativeService : public BnNetd {
   public:
     NetdNativeService();
     static status_t start();
@@ -272,10 +301,29 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
 
   private:
     std::vector<uid_t> intsToUids(const std::vector<int32_t>& intUids);
-    Permission convertPermission(int32_t permission);
+    //Permission convertPermission(int32_t permission);
     static FirewallRule parseRule(int32_t firewallRule);
     static ChildChain parseChildChain(int32_t childChain);
 };
+
+
+namespace ext {
+
+class NetdNativeServiceExt : public BnNetdExt {
+public:
+    NetdNativeServiceExt();
+    //static status_t start();
+    static char const* getServiceName() { return "netd"; }
+
+    binder::Status networkSetOwner(int32_t netId, int32_t uid) override;
+    //binder::Status networkCreate(const NativeNetworkConfigExt& configExt) override;
+
+private:
+};
+
+}  // namespace ext
+
+
 
 }  // namespace net
 }  // namespace android

@@ -27,6 +27,10 @@
 
 #include <algorithm>
 
+#include <cutils/multiuser.h>
+
+#include <numeric>
+
 using android::base::StringAppendF;
 
 namespace android {
@@ -76,6 +80,22 @@ bool UidRanges::hasUid(uid_t uid) const {
 
 const std::vector<UidRangeParcel>& UidRanges::getRanges() const {
     return mRanges;
+}
+
+// TODO: getUserIds instead?
+const std::set<int> UidRanges::getUsers() const {
+    std::set<int> users;
+
+    for (const auto &range: mRanges) {
+        int start = multiuser_get_user_id(range.start);
+        int stop = multiuser_get_user_id(range.stop);
+
+        for (int i = start; i <= stop; ++i) {
+            users.insert(i);
+        }
+    }
+
+    return users;
 }
 
 bool UidRanges::parseFrom(int argc, char* argv[]) {

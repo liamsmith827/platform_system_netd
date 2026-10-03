@@ -89,6 +89,7 @@ public:
     static constexpr int LOCAL_NET_ID = INetd::LOCAL_NET_ID;
     static constexpr int DUMMY_NET_ID = INetd::DUMMY_NET_ID;
     static constexpr int UNREACHABLE_NET_ID = INetd::UNREACHABLE_NET_ID;
+    static constexpr int ERROR_LOCKDOWN_VPN_BLOCKING_DNS = -1;
 
     // Route mode for modify route
     enum RouteOperation { ROUTE_ADD, ROUTE_UPDATE, ROUTE_REMOVE };
@@ -100,6 +101,8 @@ public:
 
     unsigned getNetworkForUser(uid_t uid) const;
     unsigned getNetworkForConnect(uid_t uid) const;
+    int32_t getMarkForPrivateDnsResolver(unsigned netId) const;
+    // TODO: Look at every call to getNetworkContext and ensure it checks the new error if it needs to.
     void getNetworkContext(unsigned netId, uid_t uid, struct android_net_context* netcontext) const;
     bool checkLockdownVpnBlockingDns(android_net_context* netcontext) const;
     unsigned getNetworkForInterface(const char* interface) const;
@@ -111,6 +114,8 @@ public:
     [[nodiscard]] int createVirtualNetwork(unsigned netId, bool secure, NativeVpnType vpnType,
                                            bool excludeLocalRoutes);
     [[nodiscard]] int destroyNetwork(unsigned netId);
+    // TODO: Is int32_t to unsigned conversion safe?
+    void networkSetOwner(int32_t netId, int32_t uid);
 
     [[nodiscard]] int addInterfaceToNetwork(unsigned netId, const char* interface);
     [[nodiscard]] int removeInterfaceFromNetwork(unsigned netId, const char* interface);
@@ -159,10 +164,16 @@ public:
     bool isValidNetworkLocked(unsigned netId) const;
     Network* getNetworkLocked(unsigned netId) const;
 
+    struct mark_wrapper {
+        uint32_t* mark;
+    };
     // Sets |*netId| to an appropriate NetId to use for DNS for the given user. Call with |*netId|
-    // set to a non-NETID_UNSET value if the user already has indicated a preference. Returns the
-    // fwmark value to set on the socket when performing the DNS request.
-    uint32_t getNetworkForDnsLocked(unsigned* netId, uid_t uid) const;
+    // set to a non-NETID_UNSET value if the user already has indicated a preference. Sets |*mark|
+    // to the fwmark value to set on the socket when performing the DNS request. If there is no
+    // appropriate network for DNS, |*netId| is set to NETID_UNSET, a negative value is returned and
+    // |*mark| should be ignored. Otherwise, 0 is returned.
+    int getNetworkForDnsLocked(unsigned* netId, mark_wrapper* markWrapper, uid_t uid,
+                               bool requireVpnNameservers) const;
     unsigned getNetworkForConnectLocked(uid_t uid) const;
     unsigned getNetworkForInterfaceLocked(const char* interface) const;
     unsigned getNetworkForInterfaceLocked(const int ifIndex) const;
@@ -215,6 +226,8 @@ public:
     std::unordered_map<std::string, std::unordered_set<unsigned>> mAddressToIfindices;
 
     UidRanges mVpnLockdownUids;
+
+    bool isLockdownVpn(Network* network) const;
 };
 
 }  // namespace android::net

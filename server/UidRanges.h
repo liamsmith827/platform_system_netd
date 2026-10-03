@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <utility>
 #include <vector>
+#include <set>
 
 namespace android {
 namespace net {
@@ -42,6 +43,8 @@ public:
 
     bool hasUid(uid_t uid) const;
     const std::vector<UidRangeParcel>& getRanges() const;
+
+    const std::set<int> getUsers() const;
 
     bool parseFrom(int argc, char* argv[]);
     std::string toString() const;

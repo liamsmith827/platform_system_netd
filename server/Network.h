@@ -69,6 +69,12 @@ public:
     void setAllowedUids(const UidRanges& uidRanges);
     bool isUidAllowed(uid_t uid);
 
+    void setOwnerUid(int32_t ownerUid);
+    int32_t getOwnerUid();
+
+    // TODO: Declare/define this better?
+    static constexpr int kOwnerUidUnset = -2;
+
   protected:
     explicit Network(unsigned netId, bool secure = false);
     bool canAddUidRanges(const UidRanges& uidRanges) const;
@@ -81,6 +87,9 @@ public:
     // UIDs that can explicitly select this network. It means no restriction for all UIDs if the
     // optional variable has no value.
     std::optional<UidRanges> mAllowedUids;
+    // TODO: int32_t or just int? UidRangeParcel uses int in aidl which maps to int32_t, then uses int in method types.
+    // TODO: const like mNetId?
+    int32_t mOwnerUid;
 
   private:
     enum Action {

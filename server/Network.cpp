@@ -149,7 +149,16 @@ bool Network::isSecure() const {
     return mSecure;
 }
 
-Network::Network(unsigned netId, bool secure) : mNetId(netId), mSecure(secure) {}
+int32_t Network::getOwnerUid() {
+    return mOwnerUid;
+}
+
+void Network::setOwnerUid(int32_t ownerUid) {
+    mOwnerUid = ownerUid;
+}
+
+Network::Network(unsigned netId, bool secure) : mNetId(netId), mSecure(secure),
+    mOwnerUid(kOwnerUidUnset) {}
 
 }  // namespace net
 }  // namespace android
