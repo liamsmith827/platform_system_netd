@@ -60,37 +60,13 @@ using android::netdutils::DumpWriter;
 using android::netdutils::getIfaceNames;
 using android::netdutils::ScopedIndent;
 using android::os::ParcelFileDescriptor;
+using android::net::ext::NetdNativeServiceExt;
 
 namespace android {
 namespace net {
 
 namespace {
 const char OPT_SHORT[] = "--short";
-
-#define ENFORCE_ANY_PERMISSION(...)                                \
-    do {                                                           \
-        binder::Status status = checkAnyPermission({__VA_ARGS__}); \
-        if (!status.isOk()) {                                      \
-            return status;                                         \
-        }                                                          \
-    } while (0)
-
-#define NETD_LOCKING_RPC(lock, ... /* permissions */) \
-    ENFORCE_ANY_PERMISSION(__VA_ARGS__);              \
-    std::lock_guard _lock(lock);
-
-#define NETD_BIG_LOCK_RPC(... /* permissions */) NETD_LOCKING_RPC(gBigNetdLock, __VA_ARGS__)
-
-#define RETURN_BINDER_STATUS_IF_NOT_OK(logEntry, res) \
-    do {                                              \
-        if (!isOk((res))) {                           \
-            logErrorStatus((logEntry), (res));        \
-            return asBinderStatus((res));             \
-        }                                             \
-    } while (0)
-
-#define ENFORCE_NETWORK_STACK_PERMISSIONS() \
-    ENFORCE_ANY_PERMISSION(PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK)
 
 void logErrorStatus(netdutils::LogEntry& logEntry, const netdutils::Status& status) {
     gLog.log(logEntry.returns(status.code()).withAutomaticDuration());
@@ -121,6 +97,21 @@ bool contains(const Vector<String16>& words, const String16& word) {
 
 }  // namespace
 
+
+// TODO: Do we actually need any of these anon namespaces I'm creating?
+//namespace {
+    Permission convertPermission(int32_t permission) {
+        switch (permission) {
+            case INetd::PERMISSION_NETWORK:
+                return Permission::PERMISSION_NETWORK;
+            case INetd::PERMISSION_SYSTEM:
+                return Permission::PERMISSION_SYSTEM;
+            default:
+                return Permission::PERMISSION_NONE;
+        }
+    }
+//}
+
 NetdNativeService::NetdNativeService() {
     // register log callback to BnNetd::logFunc
     BnNetd::logFunc = [](const auto& log) {
@@ -130,7 +121,15 @@ NetdNativeService::NetdNativeService() {
 
 status_t NetdNativeService::start() {
     IPCThreadState::self()->disableBackgroundScheduling(true);
-    const status_t ret = BinderService<NetdNativeService>::publish();
+
+    // TODO: Is excluding () from these (and hence not zero initializing them) a probblem? Is this static? Does that matter?
+    //sp<Foo> foo = sp<Foo>::make(...); // DO THIS
+    sp<NetdNativeService> netdService = new NetdNativeService;
+    sp<NetdNativeServiceExt> netdServiceExt = new NetdNativeServiceExt;
+    netdService->setExtension(netdServiceExt);
+
+    status_t ret = defaultServiceManager()->addService(String16(getServiceName()), netdService);
+
     if (ret != android::OK) {
         return ret;
     }
@@ -1012,17 +1011,6 @@ std::vector<uid_t> NetdNativeService::intsToUids(const std::vector<int32_t>& int
     return {begin(intUids), end(intUids)};
 }
 
-Permission NetdNativeService::convertPermission(int32_t permission) {
-    switch (permission) {
-        case INetd::PERMISSION_NETWORK:
-            return Permission::PERMISSION_NETWORK;
-        case INetd::PERMISSION_SYSTEM:
-            return Permission::PERMISSION_SYSTEM;
-        default:
-            return Permission::PERMISSION_NONE;
-    }
-}
-
 binder::Status NetdNativeService::networkSetPermissionForNetwork(int32_t netId,
                                                                  int32_t permission) {
     ENFORCE_NETWORK_STACK_PERMISSIONS();
@@ -1196,6 +1184,51 @@ binder::Status NetdNativeService::setNetworkAllowlist(
     ENFORCE_NETWORK_STACK_PERMISSIONS();
     return statusFromErrcode(gCtls->netCtrl.setNetworkAllowlist(rangeConfigs));
 }
+
+namespace {
+    void test5() {
+
+    }
+}
+
+namespace ext {
+
+NetdNativeServiceExt::NetdNativeServiceExt() {
+    // register log callback to BnNetd::logFunc
+    BnNetdExt::logFunc = [](const auto& log) {
+        binderCallLogFn(log, [](const std::string& msg) { gLog.info("%s", msg.c_str()); });
+    };
+}
+
+
+// TODO: Is there race condition due to this being set separately? Can these just be
+    // overcome by checking virtual and not -1?
+    // I think the private DNS stuff that triggers as a result of network being created is
+    // ordered after this, but I guess private DNS settings could change between networkCreate
+    // and now. Maybe we need to set a better default value for network owner, 0 probably
+    // isn't good. Maybe UNSET = -2, NO_OWNER = -1. Alternatively just don't set for
+    // physical.
+binder::Status NetdNativeServiceExt::networkSetOwner(int32_t netId, int32_t uid) {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+
+    gLog.error("networkSetOwner called, netId: %d, uid: %d", netId, uid);
+
+    gCtls->netCtrl.networkSetOwner(netId, uid);
+    test5();
+    return binder::Status::ok();
+}
+
+
+/*
+binder::Status NetdNativeServiceExt::networkCreate([[maybe_unused]] const NativeNetworkConfigExt& configExt) {
+    //return networkCreate(config);
+    // TODO: Throw exception.
+    //return statusFromErrcode(1);
+}
+ */
+
+
+}  // namespace ext
 
 }  // namespace net
 }  // namespace android

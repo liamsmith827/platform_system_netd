@@ -34,6 +34,8 @@ namespace android::net {
 constexpr int32_t RULE_PRIORITY_VPN_OVERRIDE_SYSTEM               = 10000;
 constexpr int32_t RULE_PRIORITY_VPN_OVERRIDE_OIF                  = 11000;
 constexpr int32_t RULE_PRIORITY_VPN_OUTPUT_TO_LOCAL               = 12000;
+// TODO: Need to ensure our new system DNS rule happens before VPN tunnel routing. Also need to ensure
+// that the user 0 VPN network does not handle any VPN private DNS traffic (lockdown or otherwise).
 constexpr int32_t RULE_PRIORITY_SECURE_VPN                        = 13000;
 constexpr int32_t RULE_PRIORITY_PROHIBIT_NON_VPN                  = 14000;
 // Rules used when applications explicitly select a network that they have permission to use only

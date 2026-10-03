@@ -92,6 +92,7 @@ cc_defaults {
     name: "netd_default_sources",
     defaults: [
         "netd_aidl_interface_lateststable_cpp_shared",
+        "netd_ext_aidl_interface_lateststable_cpp_shared",
         "netd_defaults",
     ],
     include_dirs: [
@@ -138,6 +139,7 @@ cc_defaults {
         "NetdHwAidlService.cpp",
         "NetdHwService.cpp",
         "NetdNativeService.cpp",
+       // "NetdNativeServiceExt.cpp",
         "NetlinkHandler.cpp",
         "Network.cpp",
         "NetworkController.cpp",

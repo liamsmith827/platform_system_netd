@@ -1042,11 +1042,17 @@ int RouteController::modifyUnreachableNetwork(unsigned netId, const UidRangeMap&
     return 0;
 }
 
-[[nodiscard]] static int modifyRejectNonSecureNetworkRule(const UidRanges& uidRanges, bool add) {
+// TODO: Overload with custom struct/type instead of bool.
+[[nodiscard]] static int modifyRejectNonSecureNetworkRule(const UidRanges& uidRanges, bool add,
+                                                          bool systemRule) {
     Fwmark fwmark;
     Fwmark mask;
     fwmark.protectedFromVpn = false;
     mask.protectedFromVpn = true;
+    if (systemRule) {
+        fwmark.permission = PERMISSION_SYSTEM;
+        mask.permission = PERMISSION_SYSTEM;
+    }
 
     for (const UidRangeParcel& range : uidRanges.getRanges()) {
         if (int ret = modifyIpRule(add ? RTM_NEWRULE : RTM_DELRULE, RULE_PRIORITY_PROHIBIT_NON_VPN,
@@ -1057,6 +1063,52 @@ int RouteController::modifyUnreachableNetwork(unsigned netId, const UidRangeMap&
     }
 
     return 0;
+}
+
+[[nodiscard]] static int modifyRejectNonSecureNetworkRule(const UidRanges& uidRanges, bool add) {
+    return modifyRejectNonSecureNetworkRule(uidRanges, add, false);
+}
+
+// TODO: Improve this comment similar to below one.
+// Private DNS traffic for all users is sent with AID_DNS uid, which means forcing it through the
+// tunnel is only possible when leak blocking is enabled for user 0. The best solution would be to
+// introduce a per-user private DNS uid, but it's invasive and could silently introduce bugs or
+// leaks, so we add this rule instead. This prohibits the device policy manager exempting AID_DNS
+// from lockdown. Enabling enforceDnsUid in ResolverOptionsParcel is no longer possible, but that
+// option would introduce leaks anyway.
+/*
+[[nodiscard]] static int addPrivateDnsRejectRule() {
+    UidRangeParcel range;
+    range.start = AID_DNS;
+    range.stop = AID_DNS;
+    return modifyRejectNonSecureNetworkRule(UidRanges({range}), true);
+}
+ */
+
+// Allows system traffic to be protected irrespective of whether user 0 has a lockdown VPN enabled.
+//
+// Core system components have uids that make them subject to the VPN rules (routing, lockdown) of
+// user 0. A limitation to this is that when a core component selects to use an arbitrary user's
+// lockdown VPN, the protection bit is still dependent on the lockdown status of user 0.
+//
+//
+// TODO: This can probably replace the above rule as AID_DNS is system.
+/**
+ * Decouples system traffic protection bit from lockdown VPN of user 0.
+ *
+ * Core system components have uids that make them subject to the VPN rules (routing, lockdown) of
+ * user 0. A limitation of this is that when a core component selects to use an arbitrary user's
+ * lockdown VPN, forcing that traffic through the VPN is not possible unless user 0 has a lockdown
+ * VPN enabled.
+ */
+[[nodiscard]] static int addSystemRejectRule() {
+    return 0;
+    /*
+    UidRangeParcel range;
+    range.start = INVALID_UID;
+    range.stop = INVALID_UID;
+    return modifyRejectNonSecureNetworkRule(UidRanges({range}), true, true);
+     */
 }
 
 int RouteController::modifyVirtualNetwork(unsigned netId, const char* interface,
@@ -1274,6 +1326,14 @@ int RouteController::Init(unsigned localNetId) {
     if (int ret = addUnreachableRule()) {
         return ret;
     }
+    //if (int ret = addPrivateDnsRejectRule()) {
+   //     return ret;
+   // }
+
+    if (int ret = addSystemRejectRule()) {
+        return ret;
+    }
+
     // Don't complain if we can't add the dummy network, since not all devices support it.
     configureDummyNetwork();
 

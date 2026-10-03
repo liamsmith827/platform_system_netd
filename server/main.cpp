@@ -81,6 +81,10 @@ void getNetworkContextCallback(uint32_t netId, uint32_t uid, android_net_context
     gCtls->netCtrl.getNetworkContext(netId, uid, netcontext);
 }
 
+int32_t getMarkForPrivateDnsResolverCallback(unsigned netId) {
+    return gCtls->netCtrl.getMarkForPrivateDnsResolver(netId);
+}
+
 bool checkCallingPermissionCallback(const char* permission) {
     return checkCallingPermission(String16(permission));
 }
@@ -115,6 +119,7 @@ bool initDnsResolver() {
     ResolverNetdCallbacks callbacks = {
             .check_calling_permission = &checkCallingPermissionCallback,
             .get_network_context = &getNetworkContextCallback,
+            .get_mark_for_private_dns_resolver = &getMarkForPrivateDnsResolverCallback,
             .log = &logCallback,
             .tagSocket = &tagSocketCallback,
             .evaluate_domain_name = &evaluateDomainNameCallback,

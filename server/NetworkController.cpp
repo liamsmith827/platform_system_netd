@@ -47,6 +47,8 @@
 #include "netdutils/Utils.h"
 #include "netid_client.h"
 
+#include <cutils/multiuser.h>
+
 #define DBG 0
 
 #include <android_net_platform_flags.h>
@@ -218,30 +220,70 @@ int NetworkController::setDefaultNetwork(unsigned netId) {
 // This complements the default DNS server leak solution added in getNetworkForDnsLocked(). This
 // gets called much earlier in the DNS request execution. Both solutions do currently suffice on
 // their own.
+// Another advantage of keeping this is that it catches bugs or changes in upstream code where
+// NETID_UNSET is not returned when it should be.
 bool NetworkController::checkLockdownVpnBlockingDns(android_net_context* netcontext) const {
-    ScopedRLock lock(mRWLock);
+    // TODO: Is lock needed now that this is called from getNetworkContext?
+        ScopedRLock lock(mRWLock);
 
-    uid_t uid = netcontext->uid;
-
-    Fwmark dnsMark;
-    dnsMark.intValue = netcontext->dns_mark;
-
-    if (dnsMark.protectedFromVpn || !mVpnLockdownUids.hasUid(uid)) {
+        uid_t uid = netcontext->uid;
         return false;
+
+        /*
+        Permission permission = getPermissionForUserLocked(uid);
+
+        Network* network = getNetworkLocked(netcontext->dns_netid);
+
+        Fwmark dnsMark;
+        dnsMark.intValue = netcontext->dns_mark;
+
+        if (dnsMark.protectedFromVpn || !mVpnLockdownUids.hasUid(uid)) {
+            return false;
+        }
+
+        if (permission == PERMISSION_SYSTEM && )
+
+        // if !protected && lockdown
+        //     dnsMark.netId must equal getVirtualNetworkForUserLocked or it must be unset and nc.blocked must be set
+        //
+
+        VirtualNetwork* userVirtualNetwork = getVirtualNetworkForUserLocked(uid);
+        return userVirtualNetwork == nullptr
+            // This looks like it prohibits the case where the VPN has no DNS servers
+            // while private DNS is enabled. However, this case is already prohibited because private DNS
+            // is either in STRICT mode and its hostname can't be resolved due to the VPN having no DNS
+            // servers, or it's in OPPORTUNISTIC mode in which case it would use the VPN's DNS servers
+            // for private DNS, of which there are none.
+            || (userVirtualNetwork->getNetId() != netcontext->dns_netid
+            || userVirtualNetwork->getNetId() != netcontext->private_dns_netid);
+
+         */
     }
 
-    VirtualNetwork* userVirtualNetwork = getVirtualNetworkForUserLocked(uid);
-    return userVirtualNetwork == nullptr || userVirtualNetwork->getNetId() != netcontext->dns_netid;
-}
 
-uint32_t NetworkController::getNetworkForDnsLocked(unsigned* netId, uid_t uid) const {
+// TODO: I think in the packet capture of non-leak blocking VPN with only
+    // partial routing and no DNS server that this just used the default network's
+    // DNS to resolve it. Is that what we want to do?
+
+// TODO: Make requireVpnNameservers a type/struct.
+// TODO: Private DNS hostname resolution when VPN has no nameservers?
+// TODO: How do the new additions affect private DNS selection?
+// TODO: Review everything for normal app, system component, vpn app for lockdown, no lockdown, bypassable.
+// TODO: With the level of complexity here we really need a unit test for every path.
+// TODO: Should getNtworkForConnect return errors in any case?
+int NetworkController::getNetworkForDnsLocked(unsigned* netId, struct mark_wrapper* markWrapper,
+                                              uid_t uid, bool requireVpnNameservers) const {
     Fwmark fwmark;
     fwmark.protectedFromVpn = canProtectLocked(uid, *netId);
     fwmark.permission = getPermissionForUserLocked(uid);
 
     Network* appDefaultNetwork = getPhysicalOrUnreachableNetworkForUserLocked(uid);
     unsigned defaultNetId = appDefaultNetwork ? appDefaultNetwork->getNetId() : mDefaultNetId;
-    if (!fwmark.protectedFromVpn && mVpnLockdownUids.hasUid(uid)) {
+
+    bool uidLockedDown = !fwmark.protectedFromVpn && (mVpnLockdownUids.hasUid(uid));
+    /*
+    if (!fwmark.protectedFromVpn && (mVpnLockdownUids.hasUid(uid))) {
+
         // If a uid is under a lockdown VPN, using the default network DNS servers is a DNS leak.
         //
         // The servers to be used for a resolution are set in resolv_populate_res_for_net(). There
@@ -249,6 +291,7 @@ uint32_t NetworkController::getNetworkForDnsLocked(unsigned* netId, uid_t uid) c
         // res_nsend() where -ESRCH is returned due to the lack of servers.
         defaultNetId = NETID_UNSET;
     }
+     */
 
     // Common case: there is no VPN that applies to the user, and the query did not specify a netId.
     // Therefore, it is safe to set the explicit bit on this query and skip all the complex logic
@@ -256,10 +299,17 @@ uint32_t NetworkController::getNetworkForDnsLocked(unsigned* netId, uid_t uid) c
     // majority of DNS queries.
     // TODO: untangle this code.
     if (*netId == NETID_UNSET && getVirtualNetworkForUserLocked(uid) == nullptr) {
+        if (uidLockedDown) {
+            *netId = NETID_UNSET;
+            return -ERROR_LOCKDOWN_VPN_BLOCKING_DNS;
+        }
         *netId = defaultNetId;
         fwmark.netId = *netId;
         fwmark.explicitlySelected = true;
-        return fwmark.intValue;
+        if (markWrapper) {
+            *(markWrapper->mark) = fwmark.intValue;
+        }
+        return 0;
     }
 
     if (checkUserNetworkAccessLocked(uid, *netId) == 0) {
@@ -272,32 +322,70 @@ uint32_t NetworkController::getNetworkForDnsLocked(unsigned* netId, uid_t uid) c
         // servers (through the default network). Otherwise, the query is guaranteed to fail.
         // http://b/29498052
         Network *network = getNetworkLocked(*netId);
+        // TODO: Move this inside the if?
+        bool networkLockedDown = isLockdownVpn(network);
         if (network && network->isVirtual()) {
-            if (!resolv_has_nameservers(*netId)) {
+            if (!resolv_has_nameservers(*netId) && requireVpnNameservers) {
+                // TODO: What if if PERMISSION_SYSTEM but not locked down? User 0 could potentially have a lockdown VPN but SYSTEM is targetting a non-lockdown VPN.
+                if ((fwmark.permission == PERMISSION_SYSTEM && networkLockedDown) || uidLockedDown) {
+                    *netId = NETID_UNSET;
+                    return -ERROR_LOCKDOWN_VPN_BLOCKING_DNS;
+                }
                 // If the VPN app itself gets here then it has made a mistake. If it wouldn't cause
                 // compatibility issues, we could save it from leaking.
                 *netId = defaultNetId;
-            } else {
+                // TODO: What if the VPN app selects to use the physical network?
+            } else if (!(fwmark.permission == PERMISSION_SYSTEM) || networkLockedDown) {
+                // RouterController.addPrivateDnsRejectRule() rule would drop this if it was
+                // unprotected, so explicitly select it and allow it to fallback if needed. This
+                // could be done for all !isLockdownVpn() traffic regardless of permission.
                 fwmark.protectedFromVpn = false;
             }
         }
+    } else if (*netId != NETID_UNSET && getNetworkLocked(*netId) == nullptr
+               && fwmark.protectedFromVpn) {
+        // If a core system component or a VPN app specifies a network that no longer exists,
+        // we must assume that network was previously a lockdown VPN and prevent the DNS request
+        // from leaking. This is an infrequent path, so introducing a network cache to avoid
+        // making the assumption is overkill.
+        //
+        // In practice this prevents system_server from leaking when it resolves the hostname of
+        // a private DNS server, and allows VPN apps to force requests over the tunnel.
+        //
+        // Unprotected uids are not included in this check because some apps might use stale Network
+        // objects for their DNS requests, and they might break. In practice if these apps are under
+        // a lockdown VPN they can only specify that VPN and requests are already forced through it,
+        // or if they aren't under a lockdown VPN they don't have a lockdown VPN to specify.
+        *netId = NETID_UNSET;
+        return -ERROR_LOCKDOWN_VPN_BLOCKING_DNS;
     } else {
         // If the user is subject to a VPN and the VPN provides DNS servers, use those servers
         // (possibly falling through to the default network if the VPN doesn't provide a route to
         // them). Otherwise, use the default network's DNS servers.
         // TODO: Consider if we should set the explicit bit here.
         VirtualNetwork* virtualNetwork = getVirtualNetworkForUserLocked(uid);
-        if (virtualNetwork && resolv_has_nameservers(virtualNetwork->getNetId())) {
+        if (virtualNetwork && (resolv_has_nameservers(virtualNetwork->getNetId())
+                || !requireVpnNameservers)) {
             *netId = virtualNetwork->getNetId();
-            fwmark.protectedFromVpn = false;
+            if (fwmark.permission == PERMISSION_SYSTEM && !isLockdownVpn(virtualNetwork)) {
+                // Refer to reasoning about RouterController.addPrivateDnsRejectRule() above.
+                fwmark.explicitlySelected = true;
+            } else {
+                fwmark.protectedFromVpn = false;
+            }
         } else {
-            // TODO: return an error instead of silently doing the DNS lookup on the wrong network.
-            // http://b/27560555
+            if (uidLockedDown) {
+                *netId = NETID_UNSET;
+                return -ERROR_LOCKDOWN_VPN_BLOCKING_DNS;
+            }
             *netId = defaultNetId;
         }
     }
     fwmark.netId = *netId;
-    return fwmark.intValue;
+    if (markWrapper) {
+        *(markWrapper->mark) = fwmark.intValue;
+    }
+    return 0;
 }
 
 // Returns the NetId that a given UID would use if no network is explicitly selected. Specifically,
@@ -352,6 +440,76 @@ unsigned NetworkController::getNetworkForConnect(uid_t uid) const {
     return getNetworkForConnectLocked(uid);
 }
 
+bool NetworkController::isLockdownVpn(Network* network) const {
+    int32_t ownerUser = multiuser_get_user_id(network->getOwnerUid());
+    std::set lockdownVpnUsers = mVpnLockdownUids.getUsers();
+    /*
+    for (auto const& element : lockdownVpnUsers) {
+        ALOGE("getMarkForPrivateDnsResolver, lockdown user: %d", element);
+        std::cout << " " << element;
+    }
+     */
+
+    // TODO: What if all users are exempt from lockdown?
+    // TODO: end vs cend (used in isprotectablelockd)
+    if (lockdownVpnUsers.find(ownerUser) == lockdownVpnUsers.end()) {
+        return false;
+    }
+    return true;
+}
+
+// The marks returned from this method were calculated based on the RPDM (`ip rule`) output.
+// They are not intended to be consistent with the semantics that AOSP applies to them, such as
+// what's described in FwMarkServer, Permission, NetworkController etc. For example, the private
+// resolver is being sent by AID_DNS which is a system uid, but PERMISSION_SYSTEM is only granted
+// where it's needed. AOSP blindly following poorly-defined semantics has resulted in countless
+// leaks.
+// TODO: Rename to getPrivateDnsResolverMark?
+// TODO: Why can't this use the mark returned from getDnsForNetworkLocked?
+int32_t NetworkController::getMarkForPrivateDnsResolver(unsigned netId) const {
+    ScopedRLock lock(mRWLock);
+
+    Network* network = getNetworkLocked(netId);
+    if (!network) {
+        return -ENONET;
+        // TODO: Doesn't matter if physical network is unset, how should we handle that? Should we
+        // even set physical owneruid in first place?
+    } else if (network->getOwnerUid() == Network::kOwnerUidUnset) {
+        // TODO: Improve this return code.
+        return -EINVAL;
+    }
+
+    // TODO: Need to udpate rules with addition of system protection rule.
+
+    Fwmark fwmark;
+    fwmark.netId = netId;
+    fwmark.permission = PERMISSION_SYSTEM;
+
+    if (network->isPhysical()) {
+        // Bypass RULE_PRIORITY_PROHIBIT_NON_VPN rules (AID_DNS and any user 0 VPN), then use
+        // RULE_PRIORITY_EXPLICIT_NETWORK to try go over physical network.
+        fwmark.protectedFromVpn = true;
+        fwmark.explicitlySelected = true;
+    } else if (network->isVirtual()) {
+        // Try go over the VPN using RULE_PRIORITY_SECURE_VPN.
+        //fwmark.permission = PERMISSION_SYSTEM;
+        if (isLockdownVpn(network)) {
+            // If can't go over VPN, get dropped by RULE_PRIORITY_PROHIBIT_NON_VPN (AID_DNS).
+        } else {
+            // If can't go over VPN, bypass RULE_PRIORITY_PROHIBIT_NON_VPN rules (AID_DNS and any
+            // user 0 VPN) and use RULE_PRIORITY_VPN_FALLTHROUGH to go over physical network. This
+            // protected bit is ignored by initial RULE_PRIORITY_SECURE_VPN.
+            fwmark.protectedFromVpn = true;
+        }
+    } else {
+        // TODO: ?
+        return -EINVAL;
+    }
+
+    return fwmark.intValue;
+
+}
+
 void NetworkController::getNetworkContext(
         unsigned netId, uid_t uid, struct android_net_context* netcontext) const {
     ScopedRLock lock(mRWLock);
@@ -361,6 +519,9 @@ void NetworkController::getNetworkContext(
             .app_mark = MARK_UNSET,
             .dns_netid = netId,
             .dns_mark = MARK_UNSET,
+            // Should all these default to netId instead of NETID_UNSET?
+            .private_dns_netid = netId,
+            .lockdownVpnBlockingDns = false,
             .uid = uid,
     };
 
@@ -389,7 +550,26 @@ void NetworkController::getNetworkContext(
     fwmark.permission = getPermissionForUserLocked(uid);
     nc.app_mark = fwmark.intValue;
 
-    nc.dns_mark = getNetworkForDnsLocked(&(nc.dns_netid), uid);
+    // TODO: Mix or camel and snake case?
+    mark_wrapper dns_mark{&(nc.dns_mark)};
+    int dnsErr = getNetworkForDnsLocked(&(nc.dns_netid), &dns_mark, uid, true);
+    nc.lockdownVpnBlockingDns = dnsErr == ERROR_LOCKDOWN_VPN_BLOCKING_DNS;
+
+    // TODO: If dnsErr occurs, should we set dns_mark to some value that is guaranteed to fail? This
+    // would probably require using another FwMark bit. Is app_mark/app_netid still meaningful if
+    // dns fails?
+
+    // TODO: We wre initially not setting nc.private_dns_net_id at the top of this function. We now are. Should we be?
+    // TODO: Should this test generally dnsErr != 0 as well? Currently only one error returned.
+    // ERROR_LOCKDOWN_VPN_BLOCKING_DNS means the lockdown VPN has no DNS servers. So if private DNS
+    // is in strict mode then there is no way to resolve the private DNS server's hostname, or if
+    // it's in opportunistic mode then there are no servers to use for private DNS. In either case,
+    // private DNS can't be done.
+    if (dnsErr != ERROR_LOCKDOWN_VPN_BLOCKING_DNS) {
+        // TODO: Double check this error statement.
+        // If there is no dnsErr then there will be no error here.
+        getNetworkForDnsLocked(&(nc.private_dns_netid), nullptr, uid, false);
+    }
 
     if (DBG) {
         ALOGD("app_netid:0x%x app_mark:0x%x dns_netid:0x%x dns_mark:0x%x uid:%d",
@@ -574,6 +754,15 @@ int NetworkController::destroyNetwork(unsigned netId) {
     return ret;
 }
 
+void NetworkController::networkSetOwner(int32_t netId, int32_t uid) {
+    ScopedWLock lock(mRWLock);
+
+    Network* network = getNetworkLocked(netId);
+    if (network != nullptr) {
+        network->setOwnerUid(uid);
+    }
+}
+
 int NetworkController::addInterfaceToNetwork(unsigned netId, const char* interface) {
     ScopedWLock lock(mRWLock);
 
@@ -696,6 +885,7 @@ int NetworkController::removeUsersFromNetwork(unsigned netId, const UidRanges& u
     return network->removeUsers(uidRanges, subPriority);
 }
 
+// TODO: Fix up discrepancy between function name and instance variable.
 int NetworkController::updateLockdownVpnUids(bool add, const UidRanges& uidRanges) {
     ScopedWLock lock(mRWLock);
     if (add) {
@@ -1003,9 +1193,15 @@ int NetworkController::checkUserNetworkAccessLocked(uid_t uid, unsigned netId) c
     }
     // If a VPN applies to the UID, and the VPN is secure (i.e., not bypassable), then the UID can
     // only select a different network if it has the ability to protect its sockets.
+    // TODO: Confirm that even though another network can't be selected, this dns can fallthrough to default network.
     VirtualNetwork* virtualNetwork = getVirtualNetworkForUserLocked(uid);
     if (virtualNetwork && virtualNetwork->isSecure() && !isProtectableLocked(uid, netId)) {
         ALOGE("uid %u can't select networks other than %u.", uid, virtualNetwork->getNetId());
+        return -EPERM;
+    }
+    // Allowing lockdown uids to access physical networks results in DNS leaks. See
+    // getNetworkForDnsLocked.
+    if (mVpnLockdownUids.hasUid(uid) && !isProtectableLocked(uid, NETID_UNSET)) {
         return -EPERM;
     }
     // If the UID wants to use a physical network and it has a UID range that includes the UID, the
@@ -1021,6 +1217,9 @@ int NetworkController::checkUserNetworkAccessLocked(uid_t uid, unsigned netId) c
     if (!network->isUidAllowed(uid)) {
         return -EACCES;
     }
+    // TODO: Check that this is the path taken by the lockdown VPN app itself selecting the physical
+    // network. Does this play nicely with private DNS?
+
     // Check whether the UID's permission bits are sufficient to use the network.
     // Because the permission of the system default network is PERMISSION_NONE(0x0), apps can always
     // pass the check here when using the system default network.
